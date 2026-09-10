@@ -1,27 +1,60 @@
-import type { Coupon, MallOrderResult, MallPolicy, SelectedProduct } from './types';
+import type {
+  Coupon,
+  MallOrderResult,
+  ProductCandidate,
+  SelectedProduct,
+} from './types';
+
+export function calculateCandidateShipping(
+  candidate: ProductCandidate,
+  quantity: number,
+): number {
+  const rule = candidate.shipping;
+  const fee = Math.max(0, rule.fee ?? 0);
+  const subtotal = (candidate.price ?? 0) * quantity;
+
+  switch (rule.type) {
+    case 'free':
+      return 0;
+    case 'paid':
+      return fee;
+    case 'free-over-amount':
+      return subtotal >= (rule.thresholdAmount ?? Number.POSITIVE_INFINITY)
+        ? 0
+        : fee;
+    case 'free-over-quantity':
+      return quantity >= (rule.thresholdQuantity ?? Number.POSITIVE_INFINITY)
+        ? 0
+        : fee;
+    case 'unknown':
+      throw new Error('배송비를 확인하지 않은 구매 후보가 있습니다.');
+  }
+}
 
 function couponDiscount(coupon: Coupon, subtotal: number): number {
-  if (!coupon.enabled || subtotal < coupon.minOrderAmount) return 0;
-  const raw = coupon.type === 'fixed' ? coupon.value : subtotal * (coupon.value / 100);
-  return Math.max(0, Math.min(raw, coupon.maxDiscount ?? Number.POSITIVE_INFINITY, subtotal));
+  const value = coupon.value ?? 0;
+  if (!coupon.enabled || subtotal < (coupon.minOrderAmount ?? 0)) return 0;
+  const raw = coupon.type === 'fixed' ? value : subtotal * (value / 100);
+  return Math.max(
+    0,
+    Math.min(raw, coupon.maxDiscount ?? Number.POSITIVE_INFINITY, subtotal),
+  );
+}
+
+function couponLabel(coupon: Coupon): string {
+  const value = coupon.value ?? 0;
+  return coupon.type === 'fixed'
+    ? `${Math.round(value).toLocaleString('ko-KR')}원 할인`
+    : `${value}% 할인`;
 }
 
 export function calculateMallOrder(
   mallId: string,
   items: SelectedProduct[],
-  policies: MallPolicy[],
   coupons: Coupon[],
 ): MallOrderResult {
-  const subtotal = items.reduce((sum, item) => sum + item.candidate.salePrice, 0);
-  const policy = policies.find((item) => item.id === mallId);
-  const fallbackShipping = Math.max(0, ...items.map((item) => item.candidate.shippingFee ?? 0));
-  const hasFreeThreshold = policy?.freeShippingThreshold != null;
-  const shippingFee = policy
-    ? policy.noShippingFee || (hasFreeThreshold && subtotal >= policy.freeShippingThreshold!)
-      ? 0
-      : policy.defaultShippingFee
-    : fallbackShipping;
-
+  const subtotal = items.reduce((sum, item) => sum + item.itemSubtotal, 0);
+  const shippingFee = items.reduce((sum, item) => sum + item.shippingFee, 0);
   const bestCoupon = coupons
     .filter((coupon) => coupon.mallId === mallId && coupon.enabled)
     .map((coupon) => ({ coupon, discount: couponDiscount(coupon, subtotal) }))
@@ -30,28 +63,34 @@ export function calculateMallOrder(
 
   return {
     mallId,
-    mallName: policy?.name ?? items[0]?.candidate.mallName ?? '쇼핑몰',
+    mallName: items[0]?.candidate.mallName ?? '쇼핑몰',
     items,
     subtotal,
     shippingFee,
     couponDiscount: discount,
-    couponName: discount > 0 ? bestCoupon?.coupon.name : undefined,
+    couponLabel:
+      discount > 0 && bestCoupon ? couponLabel(bestCoupon.coupon) : undefined,
     total: Math.max(0, subtotal + shippingFee - discount),
   };
 }
 
 export function calculateCombination(
   selections: SelectedProduct[],
-  policies: MallPolicy[],
   coupons: Coupon[],
-): Omit<import('./types').OptimizationResult, 'exploredCombinations' | 'prunedBranches'> {
+): Omit<
+  import('./types').OptimizationResult,
+  'exploredCombinations' | 'prunedBranches'
+> {
   const grouped = new Map<string, SelectedProduct[]>();
   for (const selection of selections) {
-    grouped.set(selection.candidate.mallId, [...(grouped.get(selection.candidate.mallId) ?? []), selection]);
+    grouped.set(selection.candidate.mallId, [
+      ...(grouped.get(selection.candidate.mallId) ?? []),
+      selection,
+    ]);
   }
-  const orders = [...grouped.entries()].map(([mallId, items]) => calculateMallOrder(mallId, items, policies, coupons));
+  const orders = [...grouped.entries()].map(([mallId, items]) =>
+    calculateMallOrder(mallId, items, coupons),
+  );
   const total = orders.reduce((sum, order) => sum + order.total, 0);
-  const originalTotal = selections.reduce((sum, item) => sum + Math.max(item.candidate.originalPrice, item.candidate.salePrice), 0)
-    + orders.reduce((sum, order) => sum + order.shippingFee, 0);
-  return { total, orders, selections: [...selections], savings: Math.max(0, originalTotal - total) };
+  return { total, orders, selections: [...selections] };
 }

@@ -1,37 +1,39 @@
 export type CouponType = 'fixed' | 'percentage';
+export type ShippingRuleType =
+  | 'unknown'
+  | 'free'
+  | 'paid'
+  | 'free-over-amount'
+  | 'free-over-quantity';
+
+export interface ShippingRule {
+  type: ShippingRuleType;
+  fee?: number;
+  thresholdAmount?: number;
+  thresholdQuantity?: number;
+}
 
 export interface ProductCandidate {
   id: string;
   mallId: string;
   mallName: string;
-  url: string;
-  originalPrice: number;
-  salePrice: number;
-  discountRate?: number;
-  shippingFee?: number;
+  price?: number;
+  shipping: ShippingRule;
 }
 
 export interface ProductGroup {
   id: string;
   name: string;
+  quantity: number;
   candidates: ProductCandidate[];
-}
-
-export interface MallPolicy {
-  id: string;
-  name: string;
-  defaultShippingFee: number;
-  freeShippingThreshold?: number;
-  noShippingFee: boolean;
 }
 
 export interface Coupon {
   id: string;
-  name: string;
   mallId: string;
   type: CouponType;
-  value: number;
-  minOrderAmount: number;
+  value?: number;
+  minOrderAmount?: number;
   maxDiscount?: number;
   enabled: boolean;
 }
@@ -39,7 +41,10 @@ export interface Coupon {
 export interface SelectedProduct {
   productId: string;
   productName: string;
+  quantity: number;
   candidate: ProductCandidate;
+  itemSubtotal: number;
+  shippingFee: number;
 }
 
 export interface MallOrderResult {
@@ -49,7 +54,7 @@ export interface MallOrderResult {
   subtotal: number;
   shippingFee: number;
   couponDiscount: number;
-  couponName?: string;
+  couponLabel?: string;
   total: number;
 }
 
@@ -57,7 +62,6 @@ export interface OptimizationResult {
   total: number;
   orders: MallOrderResult[];
   selections: SelectedProduct[];
-  savings?: number;
   exploredCombinations: number;
   prunedBranches: number;
 }

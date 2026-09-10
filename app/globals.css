@@ -47,35 +47,35 @@
 }
 
 body {
-  font-family: Pretendard, "Noto Sans KR", Inter, Arial, Helvetica, sans-serif;
+  font-family: Pretendard, 'Noto Sans KR', Inter, Arial, Helvetica, sans-serif;
 }
 
 :root {
-  --background: oklch(0.977 0.009 83);
-  --foreground: oklch(0.245 0.036 257);
-  --card: oklch(0.998 0.002 83);
+  --background: oklch(0.975 0.008 246);
+  --foreground: oklch(0.23 0.035 255);
+  --card: oklch(1 0 0);
   --card-foreground: oklch(0.245 0.036 257);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.39 0.105 251);
-  --primary-foreground: oklch(0.985 0.005 90);
-  --secondary: oklch(0.94 0.025 224);
-  --secondary-foreground: oklch(0.35 0.09 250);
-  --muted: oklch(0.948 0.01 83);
+  --primary: oklch(0.48 0.18 255);
+  --primary-foreground: oklch(0.99 0.005 250);
+  --secondary: oklch(0.93 0.035 242);
+  --secondary-foreground: oklch(0.32 0.09 253);
+  --muted: oklch(0.95 0.01 248);
   --muted-foreground: oklch(0.51 0.03 255);
-  --accent: oklch(0.914 0.062 154);
-  --accent-foreground: oklch(0.33 0.08 159);
+  --accent: oklch(0.92 0.07 158);
+  --accent-foreground: oklch(0.3 0.09 159);
   --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.88 0.018 82);
-  --input: oklch(0.88 0.018 82);
-  --ring: oklch(0.55 0.11 250);
+  --border: oklch(0.88 0.02 246);
+  --input: oklch(0.86 0.025 246);
+  --ring: oklch(0.56 0.16 255);
   --chart-1: oklch(0.87 0 0);
   --chart-2: oklch(0.556 0 0);
   --chart-3: oklch(0.439 0 0);
   --chart-4: oklch(0.371 0 0);
   --chart-5: oklch(0.269 0 0);
   --radius: 0.8rem;
-  --shadow-color: oklch(0.23 0.05 251 / 55%);
+  --shadow-color: oklch(0.28 0.1 255 / 50%);
   --sidebar: oklch(0.985 0 0);
   --sidebar-foreground: oklch(0.145 0 0);
   --sidebar-primary: oklch(0.205 0 0);
@@ -126,6 +126,12 @@ body {
   }
   body {
     @apply bg-background text-foreground;
+    background-image: radial-gradient(
+      circle at top,
+      oklch(0.95 0.045 244 / 55%),
+      transparent 34rem
+    );
+    background-attachment: fixed;
   }
   html {
     @apply font-sans;
@@ -133,11 +139,7 @@ body {
 }
 
 @layer components {
-  .field-label {
-    @apply grid gap-1.5 text-xs font-semibold text-muted-foreground;
-  }
-
   .native-field {
-    @apply h-8 w-full rounded-lg border border-input bg-background px-2.5 text-sm font-normal text-foreground outline-none transition-colors focus:border-ring focus:ring-3 focus:ring-ring/20;
+    @apply w-full rounded-lg border border-input bg-background px-3 font-normal text-foreground outline-none transition-colors focus:border-ring focus:ring-3 focus:ring-ring/20;
   }
 }

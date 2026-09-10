@@ -1,218 +1,1530 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { AlertCircle, ArrowUpRight, BadgePercent, Calculator, CheckCircle2, LoaderCircle, PackagePlus, Plus, RotateCcw, ShoppingBasket, Sparkles, Trash2, Truck } from 'lucide-react';
+import { useEffect, useMemo, useState, type DragEvent } from 'react';
+import Image from 'next/image';
+import {
+  AlertCircle,
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Check,
+  CircleCheckBig,
+  ImageIcon,
+  Minus,
+  Package,
+  Pencil,
+  Plus,
+  RotateCcw,
+  ShieldCheck,
+  ShoppingBasket,
+  Sparkles,
+  TicketPercent,
+  Trash2,
+  Truck,
+  Upload,
+} from 'lucide-react';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
 import { Button } from '@/components/ui/button';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
-import { optimizeCart, validateOptimizationInput } from '@/lib/optimizer/optimizer';
-import type { Coupon, MallPolicy, OptimizationResult, ProductCandidate, ProductGroup } from '@/lib/optimizer/types';
-import { sampleCoupons, samplePolicies, sampleProducts } from '@/lib/sampleData';
+import { Progress } from '@/components/ui/progress';
+import { mallPresets } from '@/lib/malls';
+import { extractPriceCandidates } from '@/lib/ocr/extractPrices';
+import {
+  optimizeCart,
+  validateCandidates,
+  validateOptimizationInput,
+  validateProducts,
+} from '@/lib/optimizer/optimizer';
+import type {
+  Coupon,
+  OptimizationResult,
+  ProductCandidate,
+  ProductGroup,
+  ShippingRuleType,
+} from '@/lib/optimizer/types';
+import { sampleCoupons, sampleProducts } from '@/lib/sampleData';
 
+const DRAFT_KEY = 'cartwise-draft-v2';
+const MAX_FILE_SIZE = 15 * 1024 * 1024;
+const MAX_IMAGE_PIXELS = 25_000_000;
 const won = new Intl.NumberFormat('ko-KR');
 const money = (value: number) => `${won.format(Math.round(value))}원`;
-const uid = () => typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`;
+const uid = () =>
+  typeof crypto !== 'undefined' && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random()}`;
 
-function NumberField({ value, onChange, placeholder, optional = false }: { value?: number; onChange: (value: number | undefined) => void; placeholder?: string; optional?: boolean }) {
-  return <Input type="number" min="0" value={value ?? ''} placeholder={placeholder} onChange={(event) => onChange(event.target.value === '' && optional ? undefined : Number(event.target.value))} />;
+const steps = [
+  { number: 1, title: '상품과 수량', icon: Package },
+  { number: 2, title: '가격 후보', icon: Camera },
+  { number: 3, title: '배송·쿠폰', icon: Truck },
+  { number: 4, title: '비교 결과', icon: CircleCheckBig },
+] as const;
+
+type OcrState = {
+  status: 'idle' | 'loading' | 'done' | 'error';
+  progress: number;
+  previewUrl?: string;
+  fileName?: string;
+  prices: number[];
+  error?: string;
+};
+
+const blankCandidate = (id = uid()): ProductCandidate => ({
+  id,
+  mallId: '',
+  mallName: '',
+  shipping: { type: 'unknown' },
+});
+
+const blankProduct = (id = uid(), candidateId = uid()): ProductGroup => ({
+  id,
+  name: '',
+  quantity: 1,
+  candidates: [blankCandidate(candidateId)],
+});
+
+const initialProducts = [blankProduct('initial-product', 'initial-candidate')];
+
+function parseDigits(value: string): number | undefined {
+  const digits = value.replace(/\D/g, '');
+  return digits ? Number(digits) : undefined;
+}
+
+function MoneyField({
+  value,
+  onChange,
+  placeholder,
+  ariaLabel,
+}: {
+  value?: number;
+  onChange: (value: number | undefined) => void;
+  placeholder?: string;
+  ariaLabel: string;
+}) {
+  return (
+    <div className="relative">
+      <Input
+        type="text"
+        inputMode="numeric"
+        autoComplete="off"
+        aria-label={ariaLabel}
+        value={value == null ? '' : won.format(value)}
+        placeholder={placeholder}
+        className="h-11 pr-9 text-base tabular-nums"
+        onChange={(event) => onChange(parseDigits(event.target.value))}
+      />
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+        원
+      </span>
+    </div>
+  );
+}
+
+function QuantityField({
+  value,
+  onChange,
+  label,
+}: {
+  value: number;
+  onChange: (value: number) => void;
+  label: string;
+}) {
+  return (
+    <div className="inline-flex h-11 items-center rounded-xl border bg-background p-1">
+      <Button
+        type="button"
+        className="size-8 px-0"
+        variant="ghost"
+        aria-label={`${label} 줄이기`}
+        disabled={value <= 1}
+        onClick={() => onChange(Math.max(1, value - 1))}
+      >
+        <Minus />
+      </Button>
+      <input
+        className="w-12 bg-transparent text-center text-base font-bold tabular-nums outline-none"
+        inputMode="numeric"
+        aria-label={label}
+        value={value}
+        onFocus={(event) => event.currentTarget.select()}
+        onChange={(event) =>
+          onChange(Math.max(1, parseDigits(event.target.value) ?? 1))
+        }
+      />
+      <Button
+        type="button"
+        className="size-8 px-0"
+        variant="ghost"
+        aria-label={`${label} 늘리기`}
+        onClick={() => onChange(value + 1)}
+      >
+        <Plus />
+      </Button>
+    </div>
+  );
+}
+
+async function preprocessImage(file: File): Promise<HTMLCanvasElement> {
+  const bitmap = await createImageBitmap(file);
+  try {
+    if (bitmap.width * bitmap.height > MAX_IMAGE_PIXELS) {
+      throw new Error(
+        '이미지가 너무 큽니다. 화면의 가격 부분만 잘라서 다시 올려 주세요.',
+      );
+    }
+    const scale = Math.min(2, 2400 / bitmap.width, 2400 / bitmap.height);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(bitmap.width * scale));
+    canvas.height = Math.max(1, Math.round(bitmap.height * scale));
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) throw new Error('이미지를 읽을 수 없습니다.');
+    context.fillStyle = '#ffffff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    context.filter = 'grayscale(1) contrast(1.35)';
+    context.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } finally {
+    bitmap.close();
+  }
 }
 
 export default function ProductOptimizer() {
-  const [products, setProducts] = useState<ProductGroup[]>([]);
-  const [policies, setPolicies] = useState<MallPolicy[]>([]);
+  const [step, setStep] = useState(1);
+  const [products, setProducts] = useState<ProductGroup[]>(initialProducts);
   const [coupons, setCoupons] = useState<Coupon[]>([]);
   const [result, setResult] = useState<OptimizationResult>();
   const [errors, setErrors] = useState<string[]>([]);
-  const [scrapeState, setScrapeState] = useState<Record<string, { loading?: boolean; message?: string; ok?: boolean }>>({});
+  const [ocrStates, setOcrStates] = useState<Record<string, OcrState>>({});
+  const [hydrated, setHydrated] = useState(false);
+  const [resetOpen, setResetOpen] = useState(false);
 
-  const combinationCount = useMemo(() => products.reduce((count, product) => count * Math.max(product.candidates.length, 1), products.length ? 1 : 0), [products]);
+  const usedMalls = useMemo(() => {
+    const malls = new Map<string, string>();
+    for (const product of products) {
+      for (const candidate of product.candidates) {
+        if (candidate.mallId && candidate.mallName)
+          malls.set(candidate.mallId, candidate.mallName);
+      }
+    }
+    return [...malls.entries()].map(([id, name]) => ({ id, name }));
+  }, [products]);
 
-  function loadSample() {
-    setProducts(structuredClone(sampleProducts));
-    setPolicies(structuredClone(samplePolicies));
-    setCoupons(structuredClone(sampleCoupons));
-    setErrors([]);
+  const ocrIsRunning = Object.values(ocrStates).some(
+    (state) => state.status === 'loading',
+  );
+
+  useEffect(() => {
+    queueMicrotask(() => {
+      try {
+        const stored = localStorage.getItem(DRAFT_KEY);
+        if (stored) {
+          const draft = JSON.parse(stored) as {
+            products?: ProductGroup[];
+            coupons?: Coupon[];
+            step?: number;
+          };
+          if (Array.isArray(draft.products) && draft.products.length)
+            setProducts(draft.products);
+          if (Array.isArray(draft.coupons)) setCoupons(draft.coupons);
+          if (draft.step && draft.step >= 1 && draft.step <= 3)
+            setStep(draft.step);
+        }
+      } catch {
+        localStorage.removeItem(DRAFT_KEY);
+      } finally {
+        setHydrated(true);
+      }
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!hydrated) return;
+    localStorage.setItem(
+      DRAFT_KEY,
+      JSON.stringify({ products, coupons, step: Math.min(step, 3) }),
+    );
+  }, [coupons, hydrated, products, step]);
+
+  function replaceProducts(
+    next: ProductGroup[] | ((current: ProductGroup[]) => ProductGroup[]),
+  ) {
+    setProducts((current) =>
+      typeof next === 'function' ? next(current) : next,
+    );
     setResult(undefined);
-  }
-
-  function resetAll() {
-    setProducts([]); setPolicies([]); setCoupons([]); setResult(undefined); setErrors([]); setScrapeState({});
-  }
-
-  function addProduct() {
-    const firstMall = policies[0];
-    setProducts((items) => [...items, { id: uid(), name: '', candidates: [{ id: uid(), mallId: firstMall?.id ?? '', mallName: firstMall?.name ?? '', url: '', originalPrice: 0, salePrice: 0, shippingFee: firstMall?.defaultShippingFee ?? 0 }] }]);
+    setErrors([]);
   }
 
   function updateProduct(productId: string, patch: Partial<ProductGroup>) {
-    setProducts((items) => items.map((item) => item.id === productId ? { ...item, ...patch } : item));
+    replaceProducts((items) =>
+      items.map((item) =>
+        item.id === productId ? { ...item, ...patch } : item,
+      ),
+    );
   }
 
-  function updateCandidate(productId: string, candidateId: string, patch: Partial<ProductCandidate>) {
-    setProducts((items) => items.map((product) => product.id === productId ? { ...product, candidates: product.candidates.map((candidate) => candidate.id === candidateId ? { ...candidate, ...patch } : candidate) } : product));
+  function updateCandidate(
+    productId: string,
+    candidateId: string,
+    patch: Partial<ProductCandidate>,
+  ) {
+    replaceProducts((items) =>
+      items.map((product) =>
+        product.id === productId
+          ? {
+              ...product,
+              candidates: product.candidates.map((candidate) =>
+                candidate.id === candidateId
+                  ? { ...candidate, ...patch }
+                  : candidate,
+              ),
+            }
+          : product,
+      ),
+    );
   }
 
-  function addCandidate(productId: string) {
-    const firstMall = policies[0];
-    setProducts((items) => items.map((product) => product.id === productId ? { ...product, candidates: [...product.candidates, { id: uid(), mallId: firstMall?.id ?? '', mallName: firstMall?.name ?? '', url: '', originalPrice: 0, salePrice: 0, shippingFee: firstMall?.defaultShippingFee ?? 0 }] } : product));
+  function clearPreview(candidateId: string) {
+    setOcrStates((states) => {
+      const state = states[candidateId];
+      if (state?.previewUrl) URL.revokeObjectURL(state.previewUrl);
+      const next = { ...states };
+      delete next[candidateId];
+      return next;
+    });
   }
 
-  async function scrape(productId: string, candidate: ProductCandidate) {
-    if (!candidate.url.trim()) { setScrapeState((state) => ({ ...state, [candidate.id]: { message: '먼저 상품 URL을 입력해 주세요.' } })); return; }
-    setScrapeState((state) => ({ ...state, [candidate.id]: { loading: true } }));
+  function removeCandidate(productId: string, candidateId: string) {
+    clearPreview(candidateId);
+    replaceProducts((items) =>
+      items.map((product) =>
+        product.id === productId
+          ? {
+              ...product,
+              candidates: product.candidates.filter(
+                (item) => item.id !== candidateId,
+              ),
+            }
+          : product,
+      ),
+    );
+  }
+
+  function removeProduct(productId: string) {
+    const product = products.find((item) => item.id === productId);
+    product?.candidates.forEach((candidate) => clearPreview(candidate.id));
+    replaceProducts((items) => items.filter((item) => item.id !== productId));
+  }
+
+  function loadSample() {
+    Object.values(ocrStates).forEach(
+      (state) => state.previewUrl && URL.revokeObjectURL(state.previewUrl),
+    );
+    setOcrStates({});
+    setProducts(structuredClone(sampleProducts));
+    setCoupons(structuredClone(sampleCoupons));
+    setResult(undefined);
+    setErrors([]);
+    setStep(1);
+  }
+
+  function resetAll() {
+    Object.values(ocrStates).forEach(
+      (state) => state.previewUrl && URL.revokeObjectURL(state.previewUrl),
+    );
+    setOcrStates({});
+    setProducts([blankProduct()]);
+    setCoupons([]);
+    setResult(undefined);
+    setErrors([]);
+    setStep(1);
+    localStorage.removeItem(DRAFT_KEY);
+    setResetOpen(false);
+  }
+
+  async function analyzeImage(
+    productId: string,
+    candidateId: string,
+    file?: File,
+  ) {
+    if (!file) return;
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      setOcrStates((states) => ({
+        ...states,
+        [candidateId]: {
+          status: 'error',
+          progress: 0,
+          prices: [],
+          error: 'JPG, PNG 또는 WebP 이미지로 올려 주세요.',
+        },
+      }));
+      return;
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setOcrStates((states) => ({
+        ...states,
+        [candidateId]: {
+          status: 'error',
+          progress: 0,
+          prices: [],
+          error: '15MB 이하 이미지로 올려 주세요.',
+        },
+      }));
+      return;
+    }
+
+    const previous = ocrStates[candidateId];
+    if (previous?.previewUrl) URL.revokeObjectURL(previous.previewUrl);
+    const previewUrl = URL.createObjectURL(file);
+    setOcrStates((states) => ({
+      ...states,
+      [candidateId]: {
+        status: 'loading',
+        progress: 3,
+        prices: [],
+        previewUrl,
+        fileName: file.name || '붙여넣은 캡처',
+      },
+    }));
+
+    let worker: import('tesseract.js').Worker | undefined;
     try {
-      const response = await fetch('/api/scrape', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: candidate.url }) });
-      const data = await response.json() as { product?: { name?: string; originalPrice?: number; salePrice?: number; discountRate?: number; shippingFee?: number }; error?: string };
-      if (!response.ok || !data.product) throw new Error(data.error ?? '상품 정보를 불러오지 못했습니다.');
-      const product = data.product;
-      updateCandidate(productId, candidate.id, {
-        originalPrice: product.originalPrice ?? product.salePrice ?? candidate.originalPrice,
-        salePrice: product.salePrice ?? candidate.salePrice,
-        discountRate: product.discountRate,
-        shippingFee: product.shippingFee ?? candidate.shippingFee,
+      const canvas = await preprocessImage(file);
+      const tesseract = await import('tesseract.js');
+      worker = await tesseract.createWorker('kor', tesseract.OEM.LSTM_ONLY, {
+        workerPath: '/tesseract/worker.min.js',
+        corePath: '/tesseract/core',
+        langPath: '/tesseract/lang',
+        logger: ({ progress }) => {
+          setOcrStates((states) => ({
+            ...states,
+            [candidateId]: {
+              ...(states[candidateId] ?? { status: 'loading', prices: [] }),
+              status: 'loading',
+              progress: Math.max(5, Math.round(progress * 100)),
+            },
+          }));
+        },
       });
-      const group = products.find((item) => item.id === productId);
-      if (product.name && group && !group.name.trim()) updateProduct(productId, { name: product.name });
-      setScrapeState((state) => ({ ...state, [candidate.id]: { ok: true, message: '가져온 정보를 확인해 주세요.' } }));
+      await worker.setParameters({
+        tessedit_pageseg_mode: tesseract.PSM.SPARSE_TEXT,
+        tessedit_char_whitelist: '0123456789, 원₩￦Ww\\',
+        preserve_interword_spaces: '1',
+      });
+      const response = await worker.recognize(canvas);
+      const prices = extractPriceCandidates(response.data.text);
+      setOcrStates((states) => ({
+        ...states,
+        [candidateId]: {
+          ...states[candidateId],
+          status: prices.length ? 'done' : 'error',
+          progress: 100,
+          prices,
+          error: prices.length
+            ? undefined
+            : '가격을 찾지 못했습니다. 가격 부분만 크게 잘라 다시 올리거나 직접 입력해 주세요.',
+        },
+      }));
     } catch (error) {
-      setScrapeState((state) => ({ ...state, [candidate.id]: { message: `${error instanceof Error ? error.message : '자동 분석에 실패했습니다.'} 수동으로 입력할 수 있습니다.` } }));
+      setOcrStates((states) => ({
+        ...states,
+        [candidateId]: {
+          ...(states[candidateId] ?? { prices: [] }),
+          status: 'error',
+          progress: 0,
+          error:
+            error instanceof Error
+              ? error.message
+              : '이미지 분석에 실패했습니다.',
+        },
+      }));
+    } finally {
+      await worker?.terminate();
     }
   }
 
-  function calculate() {
-    const nextErrors = validateOptimizationInput(products, policies, coupons);
+  function handleDrop(
+    event: DragEvent<HTMLElement>,
+    productId: string,
+    candidateId: string,
+  ) {
+    event.preventDefault();
+    void analyzeImage(productId, candidateId, event.dataTransfer.files[0]);
+  }
+
+  function goNext() {
+    let nextErrors: string[] = [];
+    if (step === 1) nextErrors = validateProducts(products);
+    if (step === 2) nextErrors = validateCandidates(products);
+    if (step === 3) nextErrors = validateOptimizationInput(products, coupons);
     setErrors(nextErrors);
-    if (nextErrors.length) { setResult(undefined); document.getElementById('errors')?.scrollIntoView({ behavior: 'smooth' }); return; }
-    try { setResult(optimizeCart(products, policies, coupons)); }
-    catch (error) { setErrors([error instanceof Error ? error.message : '계산 중 오류가 발생했습니다.']); setResult(undefined); }
+    if (nextErrors.length) {
+      document
+        .getElementById('step-errors')
+        ?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      return;
+    }
+    if (step === 3) {
+      try {
+        setResult(optimizeCart(products, coupons));
+      } catch (error) {
+        setErrors([
+          error instanceof Error
+            ? error.message
+            : '계산 중 오류가 발생했습니다.',
+        ]);
+        return;
+      }
+    }
+    setStep((current) => Math.min(4, current + 1));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   }
 
   return (
     <main className="min-h-screen bg-background text-foreground">
-      <header className="sticky top-0 z-20 border-b bg-card/92 backdrop-blur">
-        <div className="mx-auto flex max-w-[1440px] items-center justify-between gap-3 px-4 py-3 sm:px-6 lg:px-8">
+      <header className="sticky top-0 z-30 border-b bg-background/92 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
           <div className="flex items-center gap-3">
-            <span className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground"><ShoppingBasket className="size-5" /></span>
-            <div><p className="text-[10px] font-bold uppercase tracking-[0.2em] text-primary">Cartwise</p><p className="text-sm font-semibold sm:text-base">장바구니 최적 구매 조합 계산기</p></div>
+            <span className="grid size-10 place-items-center rounded-xl bg-primary text-primary-foreground shadow-sm">
+              <ShoppingBasket className="size-5" />
+            </span>
+            <div>
+              <p className="text-sm font-extrabold tracking-tight">Cartwise</p>
+              <p className="hidden text-sm text-muted-foreground sm:block">
+                쇼핑 가격 비교
+              </p>
+            </div>
           </div>
-          <Button variant="ghost" onClick={resetAll} disabled={!products.length && !policies.length}><RotateCcw /> 초기화</Button>
+          <div className="flex items-center gap-2">
+            {hydrated && (
+              <span className="hidden items-center gap-1.5 text-sm text-muted-foreground sm:flex">
+                <Check className="size-4 text-emerald-600" /> 임시 저장됨
+              </span>
+            )}
+            <Button variant="ghost" onClick={() => setResetOpen(true)}>
+              <RotateCcw /> 모두 지우기
+            </Button>
+          </div>
         </div>
       </header>
 
-      <div className="mx-auto max-w-[1440px] px-4 py-7 sm:px-6 lg:px-8">
-        <div className="mb-7 flex flex-col justify-between gap-5 md:flex-row md:items-end">
-          <div className="max-w-3xl">
-            <span className="inline-flex rounded-full bg-accent px-3 py-1 text-xs font-semibold text-accent-foreground">가격·배송비·쿠폰 통합 비교</span>
-            <h1 className="mt-3 text-balance text-3xl font-bold tracking-tight md:text-4xl">개별 최저가보다 더 싼<br className="hidden sm:block" /> 장바구니 조합을 찾아보세요.</h1>
-            <p className="mt-3 max-w-2xl text-sm leading-6 text-muted-foreground">상품 후보를 입력하면 쇼핑몰별 무료배송과 가장 유리한 쿠폰까지 반영해 최종 결제 금액을 계산합니다.</p>
+      <div className="mx-auto max-w-5xl px-4 pb-28 pt-6 sm:px-6 sm:pt-8">
+        <section
+          aria-label="진행 단계"
+          className="mb-6 rounded-2xl border bg-card p-4 shadow-sm sm:p-5"
+        >
+          <div className="mb-4 flex items-center justify-between">
+            <div>
+              <p className="text-sm font-semibold text-primary">{step} / 4</p>
+              <h1 className="text-xl font-bold tracking-tight sm:text-2xl">
+                {steps[step - 1].title}
+              </h1>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              필요한 내용만 차례로 입력하세요
+            </p>
           </div>
-          <Button variant="outline" className="h-10 self-start" onClick={loadSample}><Sparkles /> 샘플 데이터로 시작</Button>
-        </div>
-
-        <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_390px]">
-          <div className="space-y-5">
-            <Card className="border-0 shadow-none ring-border">
-              <CardHeader className="border-b">
-                <div className="flex items-start justify-between gap-4">
-                  <div><CardTitle className="flex items-center gap-2 text-lg"><PackagePlus className="text-primary" /> 1. 상품 등록</CardTitle><CardDescription className="mt-1">한 상품마다 쇼핑몰 후보 중 정확히 한 곳이 선택됩니다.</CardDescription></div>
-                  <Button onClick={addProduct}><Plus /> 상품 추가</Button>
-                </div>
-              </CardHeader>
-              <CardContent className="space-y-4 pt-4">
-                {!products.length && <Empty title="등록한 상품이 없습니다" description="샘플을 불러오거나 상품을 직접 추가해 주세요." />}
-                {products.map((product, productIndex) => (
-                  <div key={product.id} className="rounded-xl border bg-background p-4">
-                    <div className="mb-4 flex items-center gap-3">
-                      <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-primary text-xs font-bold text-primary-foreground">{productIndex + 1}</span>
-                      <Input aria-label="상품명" value={product.name} placeholder="상품명 (예: 무선 마우스)" onChange={(event) => updateProduct(product.id, { name: event.target.value })} />
-                      <Button variant="ghost" size="icon" aria-label="상품 삭제" onClick={() => setProducts((items) => items.filter((item) => item.id !== product.id))}><Trash2 /></Button>
-                    </div>
-                    <div className="space-y-3">
-                      {product.candidates.map((candidate, candidateIndex) => {
-                        const status = scrapeState[candidate.id];
-                        return <div key={candidate.id} className="rounded-lg bg-muted/45 p-3">
-                          <div className="mb-3 flex items-center justify-between"><p className="text-xs font-bold text-muted-foreground">구매 후보 {candidateIndex + 1}</p><Button variant="ghost" size="xs" onClick={() => updateProduct(product.id, { candidates: product.candidates.filter((item) => item.id !== candidate.id) })}><Trash2 /> 삭제</Button></div>
-                          <div className="grid gap-3 md:grid-cols-2">
-                            <label className="field-label">쇼핑몰<select className="native-field" value={candidate.mallId} onChange={(event) => { const mall = policies.find((item) => item.id === event.target.value); updateCandidate(product.id, candidate.id, { mallId: event.target.value, mallName: mall?.name ?? '', shippingFee: mall?.defaultShippingFee ?? 0 }); }}><option value="">쇼핑몰 선택</option>{policies.map((mall) => <option key={mall.id} value={mall.id}>{mall.name}</option>)}</select></label>
-                            <label className="field-label">상품 URL<div className="flex gap-2"><Input type="url" value={candidate.url} placeholder="https://..." onChange={(event) => updateCandidate(product.id, candidate.id, { url: event.target.value })} /><Button variant="outline" className="shrink-0" onClick={() => scrape(product.id, candidate)} disabled={status?.loading}>{status?.loading ? <LoaderCircle className="animate-spin" /> : <ArrowUpRight />} 정보 불러오기</Button></div></label>
-                            <label className="field-label">정가 (원)<NumberField value={candidate.originalPrice} onChange={(value) => updateCandidate(product.id, candidate.id, { originalPrice: value ?? 0 })} /></label>
-                            <label className="field-label">최종 판매가 (원)<NumberField value={candidate.salePrice} onChange={(value) => updateCandidate(product.id, candidate.id, { salePrice: value ?? 0 })} /></label>
-                            <label className="field-label">표시 할인율 (%)<NumberField optional value={candidate.discountRate} onChange={(value) => updateCandidate(product.id, candidate.id, { discountRate: value })} placeholder="선택 입력" /></label>
-                            <label className="field-label">후보 배송비 (원)<NumberField optional value={candidate.shippingFee} onChange={(value) => updateCandidate(product.id, candidate.id, { shippingFee: value })} placeholder="쇼핑몰 조건이 우선" /></label>
-                          </div>
-                          {status?.message && <p className={`mt-2 flex items-start gap-1.5 text-xs ${status.ok ? 'text-emerald-700' : 'text-amber-700'}`}>{status.ok ? <CheckCircle2 className="mt-0.5 size-3.5 shrink-0" /> : <AlertCircle className="mt-0.5 size-3.5 shrink-0" />}{status.message}</p>}
-                        </div>;
-                      })}
-                    </div>
-                    <Button variant="outline" size="sm" className="mt-3" onClick={() => addCandidate(product.id)}><Plus /> 후보 추가</Button>
-                  </div>
-                ))}
-              </CardContent>
-            </Card>
-
-            <Card className="border-0 shadow-none ring-border">
-              <CardHeader className="border-b"><div className="flex items-start justify-between gap-4"><div><CardTitle className="flex items-center gap-2 text-lg"><Truck className="text-primary" /> 2. 쇼핑몰 배송 조건</CardTitle><CardDescription className="mt-1">같은 쇼핑몰 상품을 합친 금액으로 무료배송을 판단합니다.</CardDescription></div><Button variant="outline" onClick={() => setPolicies((items) => [...items, { id: uid(), name: '', defaultShippingFee: 0, noShippingFee: false }])}><Plus /> 쇼핑몰 추가</Button></div></CardHeader>
-              <CardContent className="space-y-3 pt-4">
-                {!policies.length && <Empty title="쇼핑몰 조건이 없습니다" description="상품 후보를 추가하기 전에 쇼핑몰을 등록해 주세요." />}
-                {policies.map((policy) => <div key={policy.id} className="grid gap-3 rounded-xl border bg-background p-3 md:grid-cols-[1.2fr_1fr_1fr_auto] md:items-end">
-                  <label className="field-label">쇼핑몰 이름<Input value={policy.name} placeholder="예: G마켓" onChange={(event) => { const name = event.target.value; setPolicies((items) => items.map((item) => item.id === policy.id ? { ...item, name } : item)); setProducts((items) => items.map((product) => ({ ...product, candidates: product.candidates.map((candidate) => candidate.mallId === policy.id ? { ...candidate, mallName: name } : candidate) }))); }} /></label>
-                  <label className="field-label">기본 배송비<NumberField value={policy.defaultShippingFee} onChange={(value) => setPolicies((items) => items.map((item) => item.id === policy.id ? { ...item, defaultShippingFee: value ?? 0 } : item))} /></label>
-                  <label className="field-label">무료배송 기준<NumberField optional value={policy.freeShippingThreshold} placeholder="비워두면 없음" onChange={(value) => setPolicies((items) => items.map((item) => item.id === policy.id ? { ...item, freeShippingThreshold: value } : item))} /></label>
-                  <div className="flex items-center gap-2 pb-0.5"><label className="flex h-8 items-center gap-2 whitespace-nowrap text-xs font-medium"><input type="checkbox" checked={policy.noShippingFee} onChange={(event) => setPolicies((items) => items.map((item) => item.id === policy.id ? { ...item, noShippingFee: event.target.checked } : item))} /> 항상 무료</label><Button variant="ghost" size="icon" aria-label="쇼핑몰 삭제" onClick={() => setPolicies((items) => items.filter((item) => item.id !== policy.id))}><Trash2 /></Button></div>
-                </div>)}
-              </CardContent>
-            </Card>
-
-            <Card className="border-0 shadow-none ring-border">
-              <CardHeader className="border-b"><div className="flex items-start justify-between gap-4"><div><CardTitle className="flex items-center gap-2 text-lg"><BadgePercent className="text-primary" /> 3. 쿠폰 등록</CardTitle><CardDescription className="mt-1">쇼핑몰 주문마다 조건을 만족하는 가장 유리한 쿠폰 한 장을 적용합니다.</CardDescription></div><Button variant="outline" onClick={() => setCoupons((items) => [...items, { id: uid(), name: '', mallId: policies[0]?.id ?? '', type: 'fixed', value: 0, minOrderAmount: 0, enabled: true }])}><Plus /> 쿠폰 추가</Button></div></CardHeader>
-              <CardContent className="space-y-3 pt-4">
-                {!coupons.length && <Empty title="등록한 쿠폰이 없습니다" description="쿠폰이 없어도 최적 조합을 계산할 수 있습니다." compact />}
-                {coupons.map((coupon) => <div key={coupon.id} className="grid gap-3 rounded-xl border bg-background p-3 md:grid-cols-3">
-                  <label className="field-label">쿠폰 이름<Input value={coupon.name} placeholder="예: 10% 장바구니 쿠폰" onChange={(event) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, name: event.target.value } : item))} /></label>
-                  <label className="field-label">적용 쇼핑몰<select className="native-field" value={coupon.mallId} onChange={(event) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, mallId: event.target.value } : item))}><option value="">선택</option>{policies.map((mall) => <option key={mall.id} value={mall.id}>{mall.name}</option>)}</select></label>
-                  <label className="field-label">할인 방식<select className="native-field" value={coupon.type} onChange={(event) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, type: event.target.value as Coupon['type'] } : item))}><option value="fixed">정액 할인</option><option value="percentage">정률 할인</option></select></label>
-                  <label className="field-label">{coupon.type === 'fixed' ? '할인 금액 (원)' : '할인율 (%)'}<NumberField value={coupon.value} onChange={(value) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, value: value ?? 0 } : item))} /></label>
-                  <label className="field-label">최소 주문금액<NumberField value={coupon.minOrderAmount} onChange={(value) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, minOrderAmount: value ?? 0 } : item))} /></label>
-                  <label className="field-label">최대 할인금액<NumberField optional value={coupon.maxDiscount} placeholder="비워두면 제한 없음" onChange={(value) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, maxDiscount: value } : item))} /></label>
-                  <div className="flex items-center justify-between md:col-span-3"><label className="flex items-center gap-2 text-xs font-medium"><input type="checkbox" checked={coupon.enabled} onChange={(event) => setCoupons((items) => items.map((item) => item.id === coupon.id ? { ...item, enabled: event.target.checked } : item))} /> 이번 계산에 사용</label><Button variant="ghost" size="sm" onClick={() => setCoupons((items) => items.filter((item) => item.id !== coupon.id))}><Trash2 /> 삭제</Button></div>
-                </div>)}
-              </CardContent>
-            </Card>
-
-            {!!errors.length && <div id="errors" className="rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-800"><p className="mb-2 flex items-center gap-2 font-bold"><AlertCircle className="size-4" /> 입력 내용을 확인해 주세요</p><ul className="list-disc space-y-1 pl-5">{errors.map((error) => <li key={error}>{error}</li>)}</ul></div>}
+          <Progress value={step * 25} aria-label={`4단계 중 ${step}단계`} />
+          <div className="mt-4 grid grid-cols-4 gap-2">
+            {steps.map((item) => {
+              const Icon = item.icon;
+              const active = item.number === step;
+              const complete = item.number < step;
+              return (
+                <button
+                  key={item.number}
+                  type="button"
+                  disabled={item.number > step}
+                  onClick={() => item.number < step && setStep(item.number)}
+                  className={`flex min-w-0 items-center gap-2 rounded-xl px-2 py-2 text-left transition-colors sm:px-3 ${
+                    active
+                      ? 'bg-primary text-primary-foreground'
+                      : complete
+                        ? 'bg-secondary text-secondary-foreground hover:bg-secondary/75'
+                        : 'text-muted-foreground'
+                  }`}
+                >
+                  <span className="grid size-7 shrink-0 place-items-center rounded-lg bg-white/15">
+                    {complete ? (
+                      <Check className="size-4" />
+                    ) : (
+                      <Icon className="size-4" />
+                    )}
+                  </span>
+                  <span className="hidden truncate text-sm font-semibold md:block">
+                    {item.title}
+                  </span>
+                </button>
+              );
+            })}
           </div>
+        </section>
 
-          <aside className="xl:sticky xl:top-20">
-            <Card className="border-0 bg-primary text-primary-foreground shadow-[0_20px_70px_-32px_var(--shadow-color)] ring-0">
-              <CardHeader><p className="text-xs font-semibold text-primary-foreground/65">4. 최적 조합 계산</p><CardTitle className="text-xl">추천 구매 조합</CardTitle><CardDescription className="text-primary-foreground/65">{products.length ? `${products.length}개 상품 · 최대 ${won.format(combinationCount)}개 조합` : '상품을 입력하면 결과가 표시됩니다.'}</CardDescription></CardHeader>
-              <CardContent>
-                {result ? <Result result={result} /> : <div className="rounded-xl border border-primary-foreground/15 bg-white/5 p-5 text-center"><Calculator className="mx-auto mb-3 size-8 text-primary-foreground/50" /><p className="font-semibold">아직 계산 전입니다</p><p className="mt-1 text-xs leading-5 text-primary-foreground/60">상품과 조건을 입력한 뒤 아래 버튼을 눌러 주세요.</p></div>}
-                <Button className="mt-5 h-12 w-full bg-white text-primary hover:bg-white/90" onClick={calculate}><Calculator /> 최적 조합 계산하기</Button>
-              </CardContent>
-            </Card>
-            <div className="mt-4 rounded-xl border bg-card p-4 text-xs leading-5 text-muted-foreground"><p className="font-semibold text-foreground">계산 방식</p><p className="mt-1">백트래킹으로 모든 유효 조합을 살피되, 남은 상품의 낙관적 최저 비용도 현재 최적값보다 비싸면 해당 가지를 탐색하지 않습니다.</p></div>
-          </aside>
-        </div>
+        {!!errors.length && <ErrorList errors={errors} />}
+
+        {step === 1 && (
+          <ProductsStep
+            products={products}
+            onLoadSample={loadSample}
+            onAdd={() => replaceProducts((items) => [...items, blankProduct()])}
+            onUpdate={updateProduct}
+            onRemove={removeProduct}
+          />
+        )}
+
+        {step === 2 && (
+          <CandidatesStep
+            products={products}
+            ocrStates={ocrStates}
+            onUpdateCandidate={updateCandidate}
+            onAddCandidate={(productId) =>
+              replaceProducts((items) =>
+                items.map((product) =>
+                  product.id === productId
+                    ? {
+                        ...product,
+                        candidates: [...product.candidates, blankCandidate()],
+                      }
+                    : product,
+                ),
+              )
+            }
+            onRemoveCandidate={removeCandidate}
+            onAnalyze={analyzeImage}
+            onDrop={handleDrop}
+            onClearPreview={clearPreview}
+          />
+        )}
+
+        {step === 3 && (
+          <ConditionsStep
+            products={products}
+            coupons={coupons}
+            usedMalls={usedMalls}
+            onUpdateCandidate={updateCandidate}
+            onCouponsChange={(next) => {
+              setCoupons(next);
+              setResult(undefined);
+              setErrors([]);
+            }}
+          />
+        )}
+
+        {step === 4 && result && (
+          <ResultsStep
+            result={result}
+            onEdit={(nextStep) => setStep(nextStep)}
+          />
+        )}
       </div>
+
+      <nav className="fixed inset-x-0 bottom-0 z-30 border-t bg-background/95 backdrop-blur-xl">
+        <div className="mx-auto flex max-w-5xl items-center justify-between gap-3 px-4 py-3 sm:px-6">
+          <Button
+            variant="outline"
+            className="h-11 min-w-24"
+            disabled={step === 1}
+            onClick={() => {
+              setErrors([]);
+              setStep((current) => Math.max(1, current - 1));
+            }}
+          >
+            <ArrowLeft /> 이전
+          </Button>
+          {step < 4 ? (
+            <Button
+              className="h-11 min-w-32"
+              disabled={ocrIsRunning}
+              onClick={goNext}
+            >
+              {step === 3 ? '결과 보기' : '다음'} <ArrowRight />
+            </Button>
+          ) : (
+            <Button className="h-11 min-w-32" onClick={() => setStep(1)}>
+              <Pencil /> 다시 수정
+            </Button>
+          )}
+        </div>
+      </nav>
+
+      <AlertDialog open={resetOpen} onOpenChange={setResetOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>입력 내용을 모두 지울까요?</AlertDialogTitle>
+            <AlertDialogDescription>
+              이 브라우저에 임시 저장된 상품, 가격, 배송비와 쿠폰이 모두
+              삭제됩니다.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>취소</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={resetAll}>
+              모두 지우기
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </main>
   );
 }
 
-function Empty({ title, description, compact = false }: { title: string; description: string; compact?: boolean }) {
-  return <div className={`rounded-xl border border-dashed bg-muted/30 text-center ${compact ? 'p-4' : 'p-7'}`}><p className="font-semibold">{title}</p><p className="mt-1 text-xs text-muted-foreground">{description}</p></div>;
+function ErrorList({ errors }: { errors: string[] }) {
+  return (
+    <div
+      id="step-errors"
+      className="mb-5 rounded-2xl border border-red-200 bg-red-50 p-4 text-red-900"
+    >
+      <p className="flex items-center gap-2 font-bold">
+        <AlertCircle className="size-5" /> 입력 내용을 확인해 주세요
+      </p>
+      <ul className="mt-2 list-disc space-y-1 pl-6 text-sm">
+        {errors.map((error) => (
+          <li key={error}>{error}</li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
-function Result({ result }: { result: OptimizationResult }) {
-  return <div>
-    <div className="mb-5"><p className="text-xs text-primary-foreground/60">전체 최종 결제 금액</p><p className="mt-1 text-4xl font-bold tracking-tight">{money(result.total)}</p>{result.savings != null && result.savings > 0 && <p className="mt-2 inline-flex rounded-full bg-emerald-300/15 px-2.5 py-1 text-xs font-semibold text-emerald-100">정가 기준 {money(result.savings)} 절약</p>}</div>
-    <div className="space-y-3">
-      {result.orders.map((order) => <div key={order.mallId} className="rounded-xl bg-white/8 p-4 ring-1 ring-white/12">
-        <div className="mb-3 flex items-center justify-between"><p className="font-bold">{order.mallName}</p><p className="font-bold">{money(order.total)}</p></div>
-        <div className="space-y-2 text-xs text-primary-foreground/75">{order.items.map((item) => <div key={item.productId} className="flex items-start justify-between gap-3"><a className="min-w-0 truncate underline decoration-white/30 underline-offset-2 hover:text-white" href={item.candidate.url || undefined} target="_blank" rel="noopener noreferrer">{item.productName}</a><span className="shrink-0">{money(item.candidate.salePrice)}</span></div>)}</div>
-        <div className="my-3 h-px bg-white/12" />
-        <dl className="space-y-1.5 text-xs"><div className="flex justify-between"><dt className="text-primary-foreground/60">상품 합계</dt><dd>{money(order.subtotal)}</dd></div><div className="flex justify-between"><dt className="text-primary-foreground/60">배송비</dt><dd>{order.shippingFee ? money(order.shippingFee) : '무료'}</dd></div><div className="flex justify-between"><dt className="text-primary-foreground/60">쿠폰 할인{order.couponName ? ` · ${order.couponName}` : ''}</dt><dd>{order.couponDiscount ? `-${money(order.couponDiscount)}` : '—'}</dd></div></dl>
-      </div>)}
+function ProductsStep({
+  products,
+  onLoadSample,
+  onAdd,
+  onUpdate,
+  onRemove,
+}: {
+  products: ProductGroup[];
+  onLoadSample: () => void;
+  onAdd: () => void;
+  onUpdate: (id: string, patch: Partial<ProductGroup>) => void;
+  onRemove: (id: string) => void;
+}) {
+  return (
+    <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+      <CardHeader className="border-b bg-card sm:flex-row sm:items-center sm:justify-between">
+        <div>
+          <CardTitle className="text-xl">무엇을 몇 개 살 건가요?</CardTitle>
+          <CardDescription className="mt-1 text-sm">
+            상품 이름과 필요한 수량만 입력하면 됩니다.
+          </CardDescription>
+        </div>
+        <Button variant="outline" onClick={onLoadSample}>
+          <Sparkles /> 예시 불러오기
+        </Button>
+      </CardHeader>
+      <CardContent className="space-y-3 p-4 sm:p-6">
+        {products.length === 0 && (
+          <div className="rounded-2xl border border-dashed bg-muted/25 p-8 text-center">
+            <p className="font-semibold">비교할 상품이 없습니다.</p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              아래 버튼으로 상품을 추가해 주세요.
+            </p>
+          </div>
+        )}
+        {products.map((product, index) => (
+          <div
+            key={product.id}
+            className="grid gap-4 rounded-2xl border bg-background p-4 sm:grid-cols-[auto_minmax(0,1fr)_auto_auto] sm:items-end"
+          >
+            <span className="grid size-9 place-items-center self-center rounded-xl bg-secondary text-sm font-bold text-secondary-foreground">
+              {index + 1}
+            </span>
+            <div className="grid gap-2 text-sm font-semibold">
+              <span>상품 이름</span>
+              <Input
+                aria-label={`${product.name || `상품 ${index + 1}`} 이름`}
+                value={product.name}
+                className="h-11 text-base"
+                placeholder="예: 무선 마우스"
+                onChange={(event) =>
+                  onUpdate(product.id, { name: event.target.value })
+                }
+              />
+            </div>
+            <div className="grid gap-2 text-sm font-semibold">
+              <span>구매 수량</span>
+              <QuantityField
+                label={`${product.name || `상품 ${index + 1}`} 구매 수량`}
+                value={product.quantity}
+                onChange={(quantity) => onUpdate(product.id, { quantity })}
+              />
+            </div>
+            <Button
+              variant="ghost"
+              className="size-11 self-end px-0 text-muted-foreground"
+              aria-label={`${product.name || `상품 ${index + 1}`} 삭제`}
+              onClick={() => onRemove(product.id)}
+            >
+              <Trash2 />
+            </Button>
+          </div>
+        ))}
+        <Button
+          variant="outline"
+          className="h-11 w-full border-dashed"
+          onClick={onAdd}
+        >
+          <Plus /> 상품 추가
+        </Button>
+      </CardContent>
+    </Card>
+  );
+}
+
+function CandidatesStep({
+  products,
+  ocrStates,
+  onUpdateCandidate,
+  onAddCandidate,
+  onRemoveCandidate,
+  onAnalyze,
+  onDrop,
+  onClearPreview,
+}: {
+  products: ProductGroup[];
+  ocrStates: Record<string, OcrState>;
+  onUpdateCandidate: (
+    productId: string,
+    candidateId: string,
+    patch: Partial<ProductCandidate>,
+  ) => void;
+  onAddCandidate: (productId: string) => void;
+  onRemoveCandidate: (productId: string, candidateId: string) => void;
+  onAnalyze: (
+    productId: string,
+    candidateId: string,
+    file?: File,
+  ) => Promise<void>;
+  onDrop: (
+    event: DragEvent<HTMLElement>,
+    productId: string,
+    candidateId: string,
+  ) => void;
+  onClearPreview: (candidateId: string) => void;
+}) {
+  const [pasteTargetId, setPasteTargetId] = useState<string>();
+  const availableTargets = products.flatMap((product) =>
+    product.candidates.map((candidate) => ({
+      productId: product.id,
+      candidateId: candidate.id,
+    })),
+  );
+  const pasteTarget =
+    availableTargets.find((target) => target.candidateId === pasteTargetId) ??
+    availableTargets[0];
+
+  useEffect(() => {
+    function pasteClipboardImage(event: globalThis.ClipboardEvent) {
+      const clipboardData = event.clipboardData;
+      if (!clipboardData) return;
+      const item = [...clipboardData.items].find((entry) =>
+        entry.type.startsWith('image/'),
+      );
+      const file = item?.getAsFile();
+      if (!file || !pasteTarget) return;
+      event.preventDefault();
+      void onAnalyze(pasteTarget.productId, pasteTarget.candidateId, file);
+    }
+
+    document.addEventListener('paste', pasteClipboardImage);
+    return () => document.removeEventListener('paste', pasteClipboardImage);
+  }, [onAnalyze, pasteTarget]);
+
+  return (
+    <div className="space-y-5">
+      <div className="flex items-start gap-3 rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-emerald-950">
+        <ShieldCheck className="mt-0.5 size-5 shrink-0 text-emerald-700" />
+        <div>
+          <p className="font-bold">캡처는 이 기기에서만 분석됩니다.</p>
+          <p className="mt-1 text-sm leading-6 text-emerald-800">
+            원하는 구매 후보를 한 번 누른 뒤, 캡처를 복사해서 Ctrl+V로 붙여넣을
+            수 있습니다. 이미지는 서버로 전송되지 않습니다.
+          </p>
+        </div>
+      </div>
+
+      {products.map((product) => (
+        <Card
+          key={product.id}
+          className="overflow-hidden border-0 shadow-sm ring-1 ring-border"
+        >
+          <CardHeader className="border-b bg-card">
+            <CardTitle className="text-lg">{product.name}</CardTitle>
+            <CardDescription>
+              {product.quantity}개를 살 때 비교할 쇼핑몰과 실제 구매가격을
+              등록하세요.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4 p-4 sm:p-6">
+            {product.candidates.map((candidate, index) => {
+              const state = ocrStates[candidate.id];
+              const inputId = `capture-${candidate.id}`;
+              return (
+                <article
+                  key={candidate.id}
+                  className="rounded-2xl border bg-background p-4"
+                  onFocusCapture={() => setPasteTargetId(candidate.id)}
+                  onPointerDownCapture={() => setPasteTargetId(candidate.id)}
+                >
+                  <div className="mb-4 flex items-center justify-between gap-3">
+                    <p className="font-bold">구매 후보 {index + 1}</p>
+                    <Button
+                      variant="ghost"
+                      className="text-muted-foreground"
+                      onClick={() =>
+                        onRemoveCandidate(product.id, candidate.id)
+                      }
+                    >
+                      <Trash2 /> 삭제
+                    </Button>
+                  </div>
+                  <div className="grid gap-4 lg:grid-cols-[0.72fr_1.28fr]">
+                    <div className="space-y-4">
+                      <label className="grid gap-2 text-sm font-semibold">
+                        쇼핑몰
+                        <select
+                          className="native-field h-11 text-base"
+                          value={candidate.mallId}
+                          onChange={(event) => {
+                            const mall = mallPresets.find(
+                              (item) => item.id === event.target.value,
+                            );
+                            onUpdateCandidate(product.id, candidate.id, {
+                              mallId: mall?.id ?? '',
+                              mallName: mall?.name ?? '',
+                            });
+                          }}
+                        >
+                          <option value="">쇼핑몰을 선택하세요</option>
+                          {mallPresets.map((mall) => (
+                            <option key={mall.id} value={mall.id}>
+                              {mall.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <div className="grid gap-2 text-sm font-semibold">
+                        <span>실제 구매가격</span>
+                        <MoneyField
+                          ariaLabel={`${product.name} ${candidate.mallName || `후보 ${index + 1}`} 실제 구매가격`}
+                          value={candidate.price}
+                          placeholder="예: 29,900"
+                          onChange={(price) =>
+                            onUpdateCandidate(product.id, candidate.id, {
+                              price,
+                            })
+                          }
+                        />
+                        <span className="text-sm font-normal leading-5 text-muted-foreground">
+                          상품 자체 할인은 반영하고, 아래에서 따로 적용할 쿠폰만
+                          제외한 개당 가격을 입력하세요.
+                        </span>
+                      </div>
+                    </div>
+
+                    <fieldset
+                      aria-label="상품 캡처 붙여넣기 또는 업로드"
+                      className={`rounded-2xl border border-dashed bg-muted/25 p-3 outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30 ${
+                        pasteTarget?.candidateId === candidate.id
+                          ? 'border-primary/70 ring-2 ring-primary/10'
+                          : ''
+                      }`}
+                    >
+                      {state?.previewUrl ? (
+                        <div className="grid gap-3 sm:grid-cols-[116px_minmax(0,1fr)]">
+                          <Image
+                            src={state.previewUrl}
+                            alt="분석할 상품 캡처 미리보기"
+                            width={112}
+                            height={112}
+                            unoptimized
+                            className="h-28 w-full rounded-xl border bg-white object-contain sm:w-28"
+                          />
+                          <div className="min-w-0">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="truncate text-sm font-semibold">
+                                  {state.fileName}
+                                </p>
+                                <p className="mt-1 text-sm text-muted-foreground">
+                                  {state.status === 'loading'
+                                    ? `가격을 찾는 중 ${state.progress}%`
+                                    : state.status === 'done'
+                                      ? `${state.prices.length}개의 가격 후보를 찾았습니다.`
+                                      : state.error}
+                                </p>
+                              </div>
+                              <Button
+                                variant="ghost"
+                                size="xs"
+                                className="size-7 px-0"
+                                aria-label="캡처 제거"
+                                disabled={state.status === 'loading'}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onClearPreview(candidate.id);
+                                }}
+                              >
+                                <Trash2 />
+                              </Button>
+                            </div>
+                            {state.status === 'loading' && (
+                              <Progress
+                                className="mt-3"
+                                value={state.progress}
+                                aria-label="가격 인식 진행률"
+                              />
+                            )}
+                            {state.prices.length > 0 && (
+                              <div className="mt-3 flex flex-wrap gap-2">
+                                {state.prices.map((price) => (
+                                  <button
+                                    type="button"
+                                    key={price}
+                                    className={`rounded-full border px-3 py-1.5 text-sm font-semibold tabular-nums transition-colors ${
+                                      candidate.price === price
+                                        ? 'border-primary bg-primary text-primary-foreground'
+                                        : 'bg-card hover:border-primary hover:text-primary'
+                                    }`}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      onUpdateCandidate(
+                                        product.id,
+                                        candidate.id,
+                                        { price },
+                                      );
+                                    }}
+                                  >
+                                    {money(price)}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                            {state.status !== 'loading' && (
+                              <button
+                                type="button"
+                                className="mt-3 inline-block cursor-pointer text-sm font-semibold text-primary hover:underline"
+                                onClick={() =>
+                                  document.getElementById(inputId)?.click()
+                                }
+                                onDragOver={(event) => event.preventDefault()}
+                                onDrop={(event) =>
+                                  onDrop(event, product.id, candidate.id)
+                                }
+                              >
+                                다른 캡처로 다시 분석
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          className="flex min-h-36 cursor-pointer flex-col items-center justify-center rounded-xl text-center"
+                          onClick={() =>
+                            document.getElementById(inputId)?.click()
+                          }
+                          onDragOver={(event) => event.preventDefault()}
+                          onDrop={(event) =>
+                            onDrop(event, product.id, candidate.id)
+                          }
+                        >
+                          <span className="grid size-11 place-items-center rounded-xl bg-secondary text-secondary-foreground">
+                            <Upload className="size-5" />
+                          </span>
+                          <span className="mt-3 font-bold">
+                            상품 캡처에서 가격 찾기
+                          </span>
+                          <span className="mt-1 text-sm text-muted-foreground">
+                            클릭해서 파일 선택 · Ctrl+V로 붙여넣기 · 끌어놓기
+                          </span>
+                        </button>
+                      )}
+                      <input
+                        id={inputId}
+                        className="sr-only"
+                        type="file"
+                        aria-label="상품 캡처 선택"
+                        accept="image/jpeg,image/png,image/webp"
+                        onChange={(event) => {
+                          void onAnalyze(
+                            product.id,
+                            candidate.id,
+                            event.target.files?.[0],
+                          );
+                          event.target.value = '';
+                        }}
+                      />
+                    </fieldset>
+                  </div>
+                </article>
+              );
+            })}
+            <Button
+              variant="outline"
+              className="h-11 w-full border-dashed"
+              onClick={() => onAddCandidate(product.id)}
+            >
+              <Plus /> {product.name} 구매 후보 추가
+            </Button>
+          </CardContent>
+        </Card>
+      ))}
     </div>
-    <p className="mt-3 text-[11px] text-primary-foreground/45">완성 조합 {won.format(result.exploredCombinations)}개 확인 · 가지 {won.format(result.prunedBranches)}개 제외</p>
-  </div>;
+  );
+}
+
+function ConditionsStep({
+  products,
+  coupons,
+  usedMalls,
+  onUpdateCandidate,
+  onCouponsChange,
+}: {
+  products: ProductGroup[];
+  coupons: Coupon[];
+  usedMalls: { id: string; name: string }[];
+  onUpdateCandidate: (
+    productId: string,
+    candidateId: string,
+    patch: Partial<ProductCandidate>,
+  ) => void;
+  onCouponsChange: (coupons: Coupon[]) => void;
+}) {
+  function updateCoupon(id: string, patch: Partial<Coupon>) {
+    onCouponsChange(
+      coupons.map((coupon) =>
+        coupon.id === id ? { ...coupon, ...patch } : coupon,
+      ),
+    );
+  }
+
+  return (
+    <div className="space-y-5">
+      <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+        <CardHeader className="border-b">
+          <CardTitle className="flex items-center gap-2 text-xl">
+            <Truck className="text-primary" /> 후보별 배송비
+          </CardTitle>
+          <CardDescription className="mt-1 text-sm">
+            모르는 배송비를 무료로 계산하지 않습니다. 각 상품 페이지에 표시된
+            조건을 선택하세요.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4 p-4 sm:p-6">
+          {products.flatMap((product) =>
+            product.candidates.map((candidate) => (
+              <ShippingCard
+                key={candidate.id}
+                product={product}
+                candidate={candidate}
+                onChange={(patch) =>
+                  onUpdateCandidate(product.id, candidate.id, patch)
+                }
+              />
+            )),
+          )}
+        </CardContent>
+      </Card>
+
+      <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
+        <CardHeader className="border-b sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <CardTitle className="flex items-center gap-2 text-xl">
+              <TicketPercent className="text-primary" /> 쿠폰{' '}
+              <span className="text-sm font-normal text-muted-foreground">
+                선택
+              </span>
+            </CardTitle>
+            <CardDescription className="mt-1 text-sm">
+              보유한 쿠폰이 있을 때만 추가하세요.
+            </CardDescription>
+          </div>
+          <Button
+            variant="outline"
+            disabled={!usedMalls.length}
+            onClick={() =>
+              onCouponsChange([
+                ...coupons,
+                {
+                  id: uid(),
+                  mallId: usedMalls[0]?.id ?? '',
+                  type: 'fixed',
+                  enabled: true,
+                },
+              ])
+            }
+          >
+            <Plus /> 쿠폰 추가
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3 p-4 sm:p-6">
+          {coupons.length === 0 && (
+            <div className="rounded-2xl border border-dashed bg-muted/25 p-6 text-center">
+              <p className="font-semibold">등록한 쿠폰이 없습니다.</p>
+              <p className="mt-1 text-sm text-muted-foreground">
+                쿠폰 없이도 바로 비교할 수 있습니다.
+              </p>
+            </div>
+          )}
+          {coupons.map((coupon) => (
+            <div
+              key={coupon.id}
+              className="grid gap-4 rounded-2xl border bg-background p-4 md:grid-cols-2"
+            >
+              <label className="grid gap-2 text-sm font-semibold">
+                적용 쇼핑몰
+                <select
+                  className="native-field h-11 text-base"
+                  value={coupon.mallId}
+                  onChange={(event) =>
+                    updateCoupon(coupon.id, { mallId: event.target.value })
+                  }
+                >
+                  {usedMalls.map((mall) => (
+                    <option key={mall.id} value={mall.id}>
+                      {mall.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="grid gap-2 text-sm font-semibold">
+                할인 방식
+                <select
+                  className="native-field h-11 text-base"
+                  value={coupon.type}
+                  onChange={(event) =>
+                    updateCoupon(coupon.id, {
+                      type: event.target.value as Coupon['type'],
+                    })
+                  }
+                >
+                  <option value="fixed">금액 할인</option>
+                  <option value="percentage">퍼센트 할인</option>
+                </select>
+              </label>
+              <div className="grid gap-2 text-sm font-semibold">
+                <span>{coupon.type === 'fixed' ? '할인 금액' : '할인율'}</span>
+                {coupon.type === 'fixed' ? (
+                  <MoneyField
+                    ariaLabel="쿠폰 할인 금액"
+                    value={coupon.value}
+                    placeholder="예: 5,000"
+                    onChange={(value) => updateCoupon(coupon.id, { value })}
+                  />
+                ) : (
+                  <div className="relative">
+                    <Input
+                      type="text"
+                      inputMode="numeric"
+                      className="h-11 pr-9 text-base"
+                      value={coupon.value ?? ''}
+                      placeholder="예: 10"
+                      onChange={(event) =>
+                        updateCoupon(coupon.id, {
+                          value: parseDigits(event.target.value),
+                        })
+                      }
+                    />
+                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-muted-foreground">
+                      %
+                    </span>
+                  </div>
+                )}
+              </div>
+              <div className="grid gap-2 text-sm font-semibold">
+                <span>
+                  최소 주문금액{' '}
+                  <span className="font-normal text-muted-foreground">
+                    선택
+                  </span>
+                </span>
+                <MoneyField
+                  ariaLabel="쿠폰 최소 주문금액"
+                  value={coupon.minOrderAmount}
+                  placeholder="조건이 없으면 비워두기"
+                  onChange={(minOrderAmount) =>
+                    updateCoupon(coupon.id, { minOrderAmount })
+                  }
+                />
+              </div>
+              {coupon.type === 'percentage' && (
+                <div className="grid gap-2 text-sm font-semibold">
+                  <span>
+                    최대 할인금액{' '}
+                    <span className="font-normal text-muted-foreground">
+                      선택
+                    </span>
+                  </span>
+                  <MoneyField
+                    ariaLabel="쿠폰 최대 할인금액"
+                    value={coupon.maxDiscount}
+                    placeholder="제한이 없으면 비워두기"
+                    onChange={(maxDiscount) =>
+                      updateCoupon(coupon.id, { maxDiscount })
+                    }
+                  />
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3 md:col-span-2">
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input
+                    type="checkbox"
+                    checked={coupon.enabled}
+                    onChange={(event) =>
+                      updateCoupon(coupon.id, { enabled: event.target.checked })
+                    }
+                  />
+                  이번 비교에 적용
+                </label>
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    onCouponsChange(
+                      coupons.filter((item) => item.id !== coupon.id),
+                    )
+                  }
+                >
+                  <Trash2 /> 삭제
+                </Button>
+              </div>
+            </div>
+          ))}
+          {coupons.length > 1 && (
+            <p className="text-sm leading-6 text-muted-foreground">
+              같은 쇼핑몰의 쿠폰은 중복하지 않고, 조건을 만족하는 쿠폰 중
+              할인액이 가장 큰 한 장을 적용합니다.
+            </p>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
+function ShippingCard({
+  product,
+  candidate,
+  onChange,
+}: {
+  product: ProductGroup;
+  candidate: ProductCandidate;
+  onChange: (patch: Partial<ProductCandidate>) => void;
+}) {
+  const rule = candidate.shipping;
+  function updateShipping(patch: Partial<ProductCandidate['shipping']>) {
+    onChange({ shipping: { ...rule, ...patch } });
+  }
+
+  return (
+    <article className="rounded-2xl border bg-background p-4">
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="font-bold">{product.name}</p>
+          <p className="mt-0.5 text-sm text-muted-foreground">
+            {candidate.mallName} · {money(candidate.price ?? 0)} ×{' '}
+            {product.quantity}개
+          </p>
+        </div>
+        {rule.type === 'unknown' && (
+          <span className="rounded-full bg-amber-100 px-2.5 py-1 text-sm font-semibold text-amber-800">
+            확인 필요
+          </span>
+        )}
+      </div>
+      <div className="grid gap-4 md:grid-cols-2">
+        <label className="grid gap-2 text-sm font-semibold">
+          배송비 조건
+          <select
+            className="native-field h-11 text-base"
+            value={rule.type}
+            onChange={(event) => {
+              const type = event.target.value as ShippingRuleType;
+              onChange({
+                shipping:
+                  type === 'free'
+                    ? { type: 'free' }
+                    : type === 'unknown'
+                      ? { type: 'unknown' }
+                      : { type, fee: rule.fee },
+              });
+            }}
+          >
+            <option value="unknown">아직 확인하지 않음</option>
+            <option value="free">항상 무료배송</option>
+            <option value="paid">배송비 있음</option>
+            <option value="free-over-amount">일정 금액 이상 무료</option>
+            <option value="free-over-quantity">일정 수량 이상 무료</option>
+          </select>
+        </label>
+        {rule.type !== 'unknown' && rule.type !== 'free' && (
+          <div className="grid gap-2 text-sm font-semibold">
+            <span>조건 미달 시 배송비</span>
+            <MoneyField
+              ariaLabel={`${product.name} ${candidate.mallName} 배송비`}
+              value={rule.fee}
+              placeholder="예: 3,000"
+              onChange={(fee) => updateShipping({ fee })}
+            />
+          </div>
+        )}
+        {rule.type === 'free-over-amount' && (
+          <div className="grid gap-2 text-sm font-semibold">
+            <span>무료배송이 되는 주문금액</span>
+            <MoneyField
+              ariaLabel={`${product.name} ${candidate.mallName} 무료배송 주문금액`}
+              value={rule.thresholdAmount}
+              placeholder="예: 50,000"
+              onChange={(thresholdAmount) =>
+                updateShipping({ thresholdAmount })
+              }
+            />
+          </div>
+        )}
+        {rule.type === 'free-over-quantity' && (
+          <div className="grid gap-2 text-sm font-semibold">
+            <span>무료배송이 되는 수량</span>
+            <QuantityField
+              label={`${product.name} ${candidate.mallName} 무료배송 기준 수량`}
+              value={rule.thresholdQuantity ?? 1}
+              onChange={(thresholdQuantity) =>
+                updateShipping({ thresholdQuantity })
+              }
+            />
+          </div>
+        )}
+      </div>
+    </article>
+  );
+}
+
+function ResultsStep({
+  result,
+  onEdit,
+}: {
+  result: OptimizationResult;
+  onEdit: (step: number) => void;
+}) {
+  return (
+    <div className="space-y-5">
+      <section className="overflow-hidden rounded-3xl bg-primary p-6 text-primary-foreground shadow-[0_24px_80px_-38px_var(--shadow-color)] sm:p-8">
+        <div className="flex flex-col justify-between gap-5 sm:flex-row sm:items-end">
+          <div>
+            <p className="text-sm font-semibold text-primary-foreground/70">
+              가장 저렴한 예상 결제액
+            </p>
+            <p className="mt-2 text-4xl font-black tracking-tight sm:text-5xl">
+              {money(result.total)}
+            </p>
+          </div>
+          <div className="rounded-2xl bg-white/10 px-4 py-3 text-sm">
+            <p className="text-primary-foreground/70">추천 주문</p>
+            <p className="mt-1 font-bold">
+              {result.orders.length}개 쇼핑몰에서 나눠 구매
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <div className="grid gap-4 lg:grid-cols-2">
+        {result.orders.map((order) => (
+          <Card
+            key={order.mallId}
+            className="overflow-hidden border-0 shadow-sm ring-1 ring-border"
+          >
+            <CardHeader className="border-b bg-card">
+              <div className="flex items-center justify-between gap-3">
+                <CardTitle className="text-lg">{order.mallName}</CardTitle>
+                <p className="text-xl font-black text-primary">
+                  {money(order.total)}
+                </p>
+              </div>
+            </CardHeader>
+            <CardContent className="space-y-4 p-4 sm:p-5">
+              <div className="space-y-3">
+                {order.items.map((item) => (
+                  <div
+                    key={item.productId}
+                    className="rounded-xl bg-muted/40 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <p className="font-semibold">{item.productName}</p>
+                      <p className="shrink-0 font-bold">
+                        {money(item.itemSubtotal)}
+                      </p>
+                    </div>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      개당 {money(item.candidate.price ?? 0)} × {item.quantity}
+                      개 · 배송비{' '}
+                      {item.shippingFee ? money(item.shippingFee) : '무료'}
+                    </p>
+                  </div>
+                ))}
+              </div>
+              <dl className="space-y-2 border-t pt-4 text-sm">
+                <div className="flex justify-between">
+                  <dt className="text-muted-foreground">상품 합계</dt>
+                  <dd>{money(order.subtotal)}</dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-muted-foreground">배송비</dt>
+                  <dd>
+                    {order.shippingFee ? money(order.shippingFee) : '무료'}
+                  </dd>
+                </div>
+                <div className="flex justify-between">
+                  <dt className="text-muted-foreground">
+                    쿠폰 할인
+                    {order.couponLabel ? ` · ${order.couponLabel}` : ''}
+                  </dt>
+                  <dd
+                    className={
+                      order.couponDiscount
+                        ? 'font-semibold text-emerald-700'
+                        : ''
+                    }
+                  >
+                    {order.couponDiscount
+                      ? `-${money(order.couponDiscount)}`
+                      : '없음'}
+                  </dd>
+                </div>
+              </dl>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Button variant="outline" className="h-11" onClick={() => onEdit(2)}>
+          <ImageIcon /> 가격 다시 확인
+        </Button>
+        <Button variant="outline" className="h-11" onClick={() => onEdit(3)}>
+          <Truck /> 배송·쿠폰 수정
+        </Button>
+      </div>
+
+      <div className="rounded-2xl border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground">
+        각 구매 후보의 배송비를 한 번씩 계산했습니다. 같은 판매자의 묶음배송은
+        아직 반영하지 않습니다.
+      </div>
+    </div>
+  );
 }
