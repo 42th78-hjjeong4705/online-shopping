@@ -166,9 +166,7 @@ export function optimizeCart(
       suffixMinimum[i + 1] +
       Math.min(
         ...sortedProducts[i].candidates.map(
-          (candidate) =>
-            (candidate.price ?? 0) * sortedProducts[i].quantity +
-            calculateCandidateShipping(candidate, sortedProducts[i].quantity),
+          (candidate) => (candidate.price ?? 0) * sortedProducts[i].quantity,
         ),
       );
   }
@@ -212,19 +210,14 @@ export function optimizeCart(
     );
     for (const candidate of candidates) {
       const itemSubtotal = (candidate.price ?? 0) * product.quantity;
-      const shippingFee = calculateCandidateShipping(
-        candidate,
-        product.quantity,
-      );
       selected.push({
         productId: product.id,
         productName: product.name,
         quantity: product.quantity,
         candidate,
         itemSubtotal,
-        shippingFee,
       });
-      search(index + 1, selectedTotal + itemSubtotal + shippingFee);
+      search(index + 1, selectedTotal + itemSubtotal);
       selected.pop();
     }
   }

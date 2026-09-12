@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
-import { calculateCandidateShipping } from '../lib/optimizer/calculateOrder';
+import {
+  calculateCandidateShipping,
+  calculateMallOrder,
+} from '../lib/optimizer/calculateOrder';
 import {
   optimizeCart,
   validateOptimizationInput,
 } from '../lib/optimizer/optimizer';
 import { extractPriceCandidates } from '../lib/ocr/extractPrices';
 import { sampleCoupons, sampleProducts } from '../lib/sampleData';
+import type { SelectedProduct } from '../lib/optimizer/types';
 
 const result = optimizeCart(sampleProducts, sampleCoupons);
 assert.equal(result.selections.length, sampleProducts.length);
@@ -28,6 +32,129 @@ assert.equal(calculateCandidateShipping(amountRule, 2), 0);
 const quantityRule = sampleProducts[1].candidates[1];
 assert.equal(calculateCandidateShipping(quantityRule, 1), 2500);
 assert.equal(calculateCandidateShipping(quantityRule, 2), 0);
+
+const sameMallPaidItems: SelectedProduct[] = [
+  {
+    productId: 'paid-a',
+    productName: '상품 A',
+    quantity: 1,
+    candidate: {
+      id: 'paid-a-candidate',
+      mallId: 'mall-shared',
+      mallName: '같은 쇼핑몰',
+      price: 20000,
+      shipping: { type: 'paid', fee: 3000 },
+    },
+    itemSubtotal: 20000,
+  },
+  {
+    productId: 'paid-b',
+    productName: '상품 B',
+    quantity: 1,
+    candidate: {
+      id: 'paid-b-candidate',
+      mallId: 'mall-shared',
+      mallName: '같은 쇼핑몰',
+      price: 25000,
+      shipping: { type: 'paid', fee: 3000 },
+    },
+    itemSubtotal: 25000,
+  },
+];
+const sameMallPaidOrder = calculateMallOrder(
+  'mall-shared',
+  sameMallPaidItems,
+  [],
+);
+assert.equal(sameMallPaidOrder.shippingFee, 3000);
+assert.equal(sameMallPaidOrder.total, 48000);
+
+const combinedThresholdItems = sameMallPaidItems.map<SelectedProduct>(
+  (item) => ({
+    ...item,
+    candidate: {
+      ...item.candidate,
+      price: 30000,
+      shipping: {
+        type: 'free-over-amount',
+        fee: 3000,
+        thresholdAmount: 50000,
+      },
+    },
+    itemSubtotal: 30000,
+  }),
+);
+assert.equal(
+  calculateMallOrder('mall-shared', combinedThresholdItems, []).shippingFee,
+  0,
+);
+
+const differentFeesItems = sameMallPaidItems.map<SelectedProduct>(
+  (item, index) => ({
+    ...item,
+    candidate: {
+      ...item.candidate,
+      shipping: { type: 'paid', fee: index === 0 ? 2500 : 4000 },
+    },
+  }),
+);
+assert.equal(
+  calculateMallOrder('mall-shared', differentFeesItems, []).shippingFee,
+  4000,
+);
+
+const groupedShippingOptimization = optimizeCart(
+  [
+    {
+      id: 'grouped-a',
+      name: '묶음 상품 A',
+      quantity: 1,
+      candidates: [
+        {
+          id: 'grouped-a-shared',
+          mallId: 'mall-bundle',
+          mallName: '묶음 쇼핑몰',
+          price: 10000,
+          shipping: { type: 'paid', fee: 5000 },
+        },
+        {
+          id: 'grouped-a-separate',
+          mallId: 'mall-separate-a',
+          mallName: '개별 쇼핑몰 A',
+          price: 13000,
+          shipping: { type: 'free' },
+        },
+      ],
+    },
+    {
+      id: 'grouped-b',
+      name: '묶음 상품 B',
+      quantity: 1,
+      candidates: [
+        {
+          id: 'grouped-b-shared',
+          mallId: 'mall-bundle',
+          mallName: '묶음 쇼핑몰',
+          price: 10000,
+          shipping: { type: 'paid', fee: 5000 },
+        },
+        {
+          id: 'grouped-b-separate',
+          mallId: 'mall-separate-b',
+          mallName: '개별 쇼핑몰 B',
+          price: 13000,
+          shipping: { type: 'free' },
+        },
+      ],
+    },
+  ],
+  [],
+);
+assert.equal(groupedShippingOptimization.total, 25000);
+assert.deepEqual(
+  groupedShippingOptimization.orders.map((order) => order.mallId),
+  ['mall-bundle'],
+);
 
 const unknownShippingProducts = structuredClone(sampleProducts);
 unknownShippingProducts[0].candidates[0].shipping = { type: 'unknown' };

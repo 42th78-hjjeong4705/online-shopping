@@ -17,7 +17,6 @@ import {
   RotateCcw,
   ShieldCheck,
   ShoppingBasket,
-  Sparkles,
   TicketPercent,
   Trash2,
   Truck,
@@ -58,9 +57,9 @@ import type {
   ProductGroup,
   ShippingRuleType,
 } from '@/lib/optimizer/types';
-import { sampleCoupons, sampleProducts } from '@/lib/sampleData';
 
 const DRAFT_KEY = 'cartwise-draft-v2';
+const DRAFT_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_FILE_SIZE = 15 * 1024 * 1024;
 const MAX_IMAGE_PIXELS = 25_000_000;
 const won = new Intl.NumberFormat('ko-KR');
@@ -239,12 +238,23 @@ export default function ProductOptimizer() {
             products?: ProductGroup[];
             coupons?: Coupon[];
             step?: number;
+            savedAt?: number;
           };
-          if (Array.isArray(draft.products) && draft.products.length)
-            setProducts(draft.products);
-          if (Array.isArray(draft.coupons)) setCoupons(draft.coupons);
-          if (draft.step && draft.step >= 1 && draft.step <= 3)
-            setStep(draft.step);
+          const savedAt = draft.savedAt ?? 0;
+          const draftAge = Date.now() - savedAt;
+          if (
+            !Number.isFinite(savedAt) ||
+            draftAge < 0 ||
+            draftAge > DRAFT_TTL_MS
+          ) {
+            localStorage.removeItem(DRAFT_KEY);
+          } else {
+            if (Array.isArray(draft.products) && draft.products.length)
+              setProducts(draft.products);
+            if (Array.isArray(draft.coupons)) setCoupons(draft.coupons);
+            if (draft.step && draft.step >= 1 && draft.step <= 3)
+              setStep(draft.step);
+          }
         }
       } catch {
         localStorage.removeItem(DRAFT_KEY);
@@ -258,7 +268,12 @@ export default function ProductOptimizer() {
     if (!hydrated) return;
     localStorage.setItem(
       DRAFT_KEY,
-      JSON.stringify({ products, coupons, step: Math.min(step, 3) }),
+      JSON.stringify({
+        products,
+        coupons,
+        step: Math.min(step, 3),
+        savedAt: Date.now(),
+      }),
     );
   }, [coupons, hydrated, products, step]);
 
@@ -331,18 +346,6 @@ export default function ProductOptimizer() {
     const product = products.find((item) => item.id === productId);
     product?.candidates.forEach((candidate) => clearPreview(candidate.id));
     replaceProducts((items) => items.filter((item) => item.id !== productId));
-  }
-
-  function loadSample() {
-    Object.values(ocrStates).forEach(
-      (state) => state.previewUrl && URL.revokeObjectURL(state.previewUrl),
-    );
-    setOcrStates({});
-    setProducts(structuredClone(sampleProducts));
-    setCoupons(structuredClone(sampleCoupons));
-    setResult(undefined);
-    setErrors([]);
-    setStep(1);
   }
 
   function resetAll() {
@@ -515,7 +518,7 @@ export default function ProductOptimizer() {
           <div className="flex items-center gap-2">
             {hydrated && (
               <span className="hidden items-center gap-1.5 text-sm text-muted-foreground sm:flex">
-                <Check className="size-4 text-emerald-600" /> 임시 저장됨
+                <Check className="size-4 text-emerald-600" /> 24시간 임시 저장
               </span>
             )}
             <Button variant="ghost" onClick={() => setResetOpen(true)}>
@@ -582,7 +585,6 @@ export default function ProductOptimizer() {
         {step === 1 && (
           <ProductsStep
             products={products}
-            onLoadSample={loadSample}
             onAdd={() => replaceProducts((items) => [...items, blankProduct()])}
             onUpdate={updateProduct}
             onRemove={removeProduct}
@@ -705,29 +707,22 @@ function ErrorList({ errors }: { errors: string[] }) {
 
 function ProductsStep({
   products,
-  onLoadSample,
   onAdd,
   onUpdate,
   onRemove,
 }: {
   products: ProductGroup[];
-  onLoadSample: () => void;
   onAdd: () => void;
   onUpdate: (id: string, patch: Partial<ProductGroup>) => void;
   onRemove: (id: string) => void;
 }) {
   return (
     <Card className="overflow-hidden border-0 shadow-sm ring-1 ring-border">
-      <CardHeader className="border-b bg-card sm:flex-row sm:items-center sm:justify-between">
-        <div>
-          <CardTitle className="text-xl">무엇을 몇 개 살 건가요?</CardTitle>
-          <CardDescription className="mt-1 text-sm">
-            상품 이름과 필요한 수량만 입력하면 됩니다.
-          </CardDescription>
-        </div>
-        <Button variant="outline" onClick={onLoadSample}>
-          <Sparkles /> 예시 불러오기
-        </Button>
+      <CardHeader className="border-b bg-card">
+        <CardTitle className="text-xl">무엇을 몇 개 살 건가요?</CardTitle>
+        <CardDescription className="mt-1 text-sm">
+          상품 이름과 필요한 수량만 입력하면 됩니다.
+        </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3 p-4 sm:p-6">
         {products.length === 0 && (
@@ -1124,8 +1119,7 @@ function ConditionsStep({
             <Truck className="text-primary" /> 후보별 배송비
           </CardTitle>
           <CardDescription className="mt-1 text-sm">
-            모르는 배송비를 무료로 계산하지 않습니다. 각 상품 페이지에 표시된
-            조건을 선택하세요.
+            같은 쇼핑몰 상품은 묶어 배송비를 한 번만 계산합니다.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4 p-4 sm:p-6">
@@ -1472,8 +1466,7 @@ function ResultsStep({
                     </div>
                     <p className="mt-1 text-sm text-muted-foreground">
                       개당 {money(item.candidate.price ?? 0)} × {item.quantity}
-                      개 · 배송비{' '}
-                      {item.shippingFee ? money(item.shippingFee) : '무료'}
+                      개
                     </p>
                   </div>
                 ))}
@@ -1519,11 +1512,6 @@ function ResultsStep({
         <Button variant="outline" className="h-11" onClick={() => onEdit(3)}>
           <Truck /> 배송·쿠폰 수정
         </Button>
-      </div>
-
-      <div className="rounded-2xl border bg-muted/30 p-4 text-sm leading-6 text-muted-foreground">
-        각 구매 후보의 배송비를 한 번씩 계산했습니다. 같은 판매자의 묶음배송은
-        아직 반영하지 않습니다.
       </div>
     </div>
   );

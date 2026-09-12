@@ -3,15 +3,15 @@ import type {
   MallOrderResult,
   ProductCandidate,
   SelectedProduct,
+  ShippingRule,
 } from './types';
 
-export function calculateCandidateShipping(
-  candidate: ProductCandidate,
+function calculateShipping(
+  rule: ShippingRule,
+  subtotal: number,
   quantity: number,
 ): number {
-  const rule = candidate.shipping;
   const fee = Math.max(0, rule.fee ?? 0);
-  const subtotal = (candidate.price ?? 0) * quantity;
 
   switch (rule.type) {
     case 'free':
@@ -29,6 +29,33 @@ export function calculateCandidateShipping(
     case 'unknown':
       throw new Error('배송비를 확인하지 않은 구매 후보가 있습니다.');
   }
+}
+
+export function calculateCandidateShipping(
+  candidate: ProductCandidate,
+  quantity: number,
+): number {
+  return calculateShipping(
+    candidate.shipping,
+    (candidate.price ?? 0) * quantity,
+    quantity,
+  );
+}
+
+export function calculateMallShipping(items: SelectedProduct[]): number {
+  if (items.length === 0) return 0;
+
+  const subtotal = items.reduce((sum, item) => sum + item.itemSubtotal, 0);
+  const quantity = items.reduce((sum, item) => sum + item.quantity, 0);
+
+  return items.reduce(
+    (highestFee, item) =>
+      Math.max(
+        highestFee,
+        calculateShipping(item.candidate.shipping, subtotal, quantity),
+      ),
+    0,
+  );
 }
 
 function couponDiscount(coupon: Coupon, subtotal: number): number {
@@ -54,7 +81,7 @@ export function calculateMallOrder(
   coupons: Coupon[],
 ): MallOrderResult {
   const subtotal = items.reduce((sum, item) => sum + item.itemSubtotal, 0);
-  const shippingFee = items.reduce((sum, item) => sum + item.shippingFee, 0);
+  const shippingFee = calculateMallShipping(items);
   const bestCoupon = coupons
     .filter((coupon) => coupon.mallId === mallId && coupon.enabled)
     .map((coupon) => ({ coupon, discount: couponDiscount(coupon, subtotal) }))

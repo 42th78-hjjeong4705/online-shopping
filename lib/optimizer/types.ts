@@ -44,7 +44,6 @@ export interface SelectedProduct {
   quantity: number;
   candidate: ProductCandidate;
   itemSubtotal: number;
-  shippingFee: number;
 }
 
 export interface MallOrderResult {
